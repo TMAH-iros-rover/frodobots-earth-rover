@@ -4,7 +4,10 @@ FrodoBots 소형 로버(Earth Rover) 주행 데이터를 가지고, [GeNIE](http
 (Wang et al., "GeNIE: A Generalizable Navigation System for In-the-Wild Environments",
 IEEE RA-L 2025 — ICRA 2025 Earth Rover Challenge 1위) 논문의 파이프라인
 (traversability 예측 -> BEV projection -> 후보 경로 샘플링/path fusion)을
-재현하고, BEV 위에서 실제 주행 행동을 학습해보는 실험 저장소.
+재현하고, BEV 위에서 실제 주행 행동을 학습해보는 실험 저장소. 여기에 더해
+`scripts/GeNIE_ws/pre_processing_dataset_withSAM2/`에서는 논문 Sec III-B의
+반자동 라벨링 파이프라인(SAM2 후보 생성 -> 사람이 웹 UI로 선택 -> 파인튜닝)을
+그대로 재현해서, 우리 데이터로 직접 "진짜" SAM-TP를 만들어본다.
 
 참고 논문 원문(`GeNIE.pdf`)과 데이터셋 tar(`minirover-0011.tar`)는 저장소 루트에
 두고 로컬에서만 쓴다 — 둘 다 용량/저작권 문제로 git에는 커밋하지 않는다
@@ -73,6 +76,11 @@ sampling/fusion은 이 스크립트 범위 밖 — `project_to_bev()`가 격자�
 - `--estimator heuristic`: torch/GPU 없이도 도는 대안. 하단-중앙 박스를 로봇 발밑
   시드로 잡고, Lab 색공간 거리 + Sobel 텍스처 그라디언트 + 지평선 억제를 조합한
   classical CV 휴리스틱. SAM2보다 정확도는 낮음.
+- `--estimator sam_tp`: `scripts/GeNIE_ws/pre_processing_dataset_withSAM2/03_train_sam_tp.py`
+  로 우리 라벨에 파인튜닝한 **진짜 SAM-TP** 체크포인트(`SamTPTraversabilityEstimator`)를
+  쓴다. `sam2`와 달리 point prompt를 아예 안 주고, 파인튜닝된 학습 가능한 prompt
+  token(`not_a_point_embed`/`no_mask_embed`)만으로 추론한다 — 자세한 원리는 아래
+  섹션과 `03_train_sam_tp.py` docstring 참고.
 
 **2) BEV(bird's-eye-view) projection** (`project_to_bev`)
 depth 카메라가 없으므로, "카메라 높이 h + 로컬하게 평평한 지면"이라는 가정만으로
@@ -115,7 +123,8 @@ python3 scripts/04_bev_traversability.py \
 
 | 옵션 | 기본값 | 설명 |
 |---|---|---|
-| `--estimator {sam2,heuristic}` | `sam2` | traversability 추정 방식 |
+| `--estimator {sam2,heuristic,sam_tp}` | `sam2` | traversability 추정 방식 |
+| `--sam-tp-checkpoint` | `runs/sam_tp/best_sam_tp.pt` | `--estimator sam_tp`일 때 쓸 체크포인트 경로 |
 | `--num-samples` | `6` | 세션 전체에서 균등 샘플링할 프레임 수 |
 | `--frame-indices` | - | 프레임 인덱스를 직접 지정 (지정 시 `--num-samples` 무시) |
 | `--cam-height` | `0.25` (m) | 카메라 지면 높이 — 로버 실측값으로 바꾸는 걸 권장 |
@@ -186,6 +195,60 @@ python3 scripts/05_train_bev_policy.py --epochs 20
 시각화). BEV 데이터셋 캐시는 기본 `bev_policy_data/dataset.npz` — 둘 다 용량이
 커질 수 있어 git에는 커밋하지 않는다.
 
+## scripts/GeNIE_ws/pre_processing_dataset_withSAM2/ — SAM-TP 라벨링 + 파인튜닝
+
+GeNIE 논문 Sec III-B의 반자동 라벨링 파이프라인을 그대로 재현한다:
+
+```
+원본 이미지 -> SAM2로 여러 영역 mask 자동 생성 -> 사람이 주행 가능한 영역을 선택 -> 최종 traversability mask -> SAM2 파인튜닝(SAM-TP)
+```
+
+**1) `01_generate_mask_proposals.py`** — `data/` 안 ride들에서 프레임을 골라(기본
+50장 목표, ride별로 고르게 분배) SAM2에 7x6 격자 point prompt를 던져 프레임당
+10~20개의 서로 다른 영역 후보를 자동 생성한다(이미지 인코더는 프레임당 1번만,
+디코더만 배치로 여러 번 돌려서 빠름). 결과는 `data/frames/`, `data/proposals/`,
+`data/manifest.csv`에 저장.
+
+```bash
+python3 scripts/GeNIE_ws/pre_processing_dataset_withSAM2/01_generate_mask_proposals.py --num-frames 50
+```
+
+**2) `02_annotate_app.py`** — 로컬 Flask 웹앱(`http://localhost:5050`)에서 후보
+영역들의 경계선(번호 포함)을 보여주고, **이미지를 직접 클릭**하거나 오른쪽
+체크박스로 "주행 가능한 영역"을 고르면 초록으로 실시간 하이라이트된다(여러 개
+선택 -> 합집합). 저장하면 `data/labels/<sample_id>.png`(최종 마스크)로 저장되고
+자동으로 다음 미완료 프레임으로 이동한다.
+
+```bash
+python3 scripts/GeNIE_ws/pre_processing_dataset_withSAM2/02_annotate_app.py
+# 원격 서버라면: ssh -L 5050:localhost:5050 <host> 로 포트포워딩 후 로컬 브라우저 접속
+```
+
+**3) `03_train_sam_tp.py`** — 라벨링된 이미지로 SAM2를 실제 "SAM-TP"로 파인튜닝.
+핵심 트릭: point/box를 하나도 안 주고 `Sam2Model`을 호출하면, HuggingFace
+transformers 구현이 자동으로 학습 가능한 `not_a_point_embed`/`no_mask_embed`
+파라미터를 prompt로 쓴다 — 이게 논문이 말하는 "traversable 개념을 담은 학습
+가능한 prompt token"과 사실상 동일한 메커니즘이라, Sam2Model을 수정하지 않고도
+표준 파인튜닝 루프로 SAM-TP를 재현할 수 있다. 데이터가 (논문의 15,347장과 달리)
+수십 장 수준으로 매우 적으므로, 기본값은 **이미지 인코더(백본)를 동결**하고
+prompt token + mask_decoder만 학습한다(`--unfreeze-encoder`로 바꿀 수 있으나
+권장 안 함). val loss 기준 최고 체크포인트를 자동 저장하며(과적합 이전 시점을
+잡기 위함), 학습 후 val 세트에 대한 [원본 | 정답 | 예측] 정성 비교 이미지도 같이
+저장한다.
+
+```bash
+python3 scripts/GeNIE_ws/pre_processing_dataset_withSAM2/03_train_sam_tp.py --epochs 60
+```
+
+결과물: `runs/sam_tp/best_sam_tp.pt`(체크포인트), `loss_curve.png`(loss/IoU
+곡선), `eval/<sample_id>.png`(정성 비교). 이 체크포인트는 바로 `04`/`06`번
+스크립트에서 `--estimator sam_tp`로 불러와 실제 BEV 파이프라인에 넣어볼 수 있다.
+
+⚠️ 라벨이 수십 장 수준이면 train loss/IoU는 계속 좋아지는데 val은 금방
+나빠지는(과적합) 게 정상이다 — `loss_curve.png`로 꼭 확인할 것. 더 정확한
+모델을 원하면 01번으로 라벨을 더 만들고(특히 "주행 불가" 사례, 다양한 지형) 02번
+으로 라벨링을 늘린 뒤 재학습하면 된다.
+
 ## 디렉토리 구조 / git에 안 올리는 것들
 
 `.gitignore`로 다음을 제외한다 — 전부 로컬에서 재생성 가능하거나(스크립트 재실행),
@@ -193,5 +256,8 @@ python3 scripts/05_train_bev_policy.py --epochs 20
 
 - `GeNIE.pdf`, `minirover-0011.tar` — 원본 자료, 저장소 루트에 로컬로만 보관
 - `data/` — 압축 해제된 데이터셋
-- `debug/`, `runs/`, `bev_policy_data/` — 스크립트 실행 결과물
+- `debug/`, `runs/`(`bev_policy/`, `sam_tp/` 포함), `bev_policy_data/` — 스크립트 실행 결과물
+- `scripts/GeNIE_ws/pre_processing_dataset_withSAM2/data/` — 01/02번이 만드는
+  프레임/SAM2 후보/라벨 (코드는 커밋하되 이미지 데이터는 제외)
+- `*.pt`, `*.npz` — 체크포인트/캐시 파일
 - `__pycache__/`, `*.pyc`

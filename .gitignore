@@ -8,6 +8,7 @@
 /runs/
 /bev_policy_data/
 /train_data/
+/scripts/GeNIE_ws/pre_processing_dataset_withSAM2/data/
 
 # 학습 산출물
 *.pt

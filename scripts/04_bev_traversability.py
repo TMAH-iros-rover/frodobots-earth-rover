@@ -306,6 +306,63 @@ class Sam2TraversabilityEstimator:
         return prob.detach().float().cpu().numpy()
 
 
+class SamTPTraversabilityEstimator:
+    """scripts/GeNIE_ws/pre_processing_dataset_withSAM2/03_train_sam_tp.py로 파인튜닝한
+    "진짜" SAM-TP 체크포인트를 쓰는 추정기. Sam2TraversabilityEstimator와 인터페이스는
+    같지만(BGR 이미지 -> HxW [0,1] 확률), 핵심 차이는 point prompt를 아예 안 준다는 것.
+
+    03번 학습 스크립트의 forward_no_prompt()와 동일한 방식: point/box/mask를 하나도
+    안 주면 Sam2Model이 자동으로 학습 가능한 not_a_point_embed(=논문이 말하는
+    "traversable" prompt token)와 no_mask_embed를 사용한다. 즉 04번의 다른 SAM2
+    추정기(Sam2TraversabilityEstimator)는 "사람이 점을 찍어주는 방식"으로 파인튜닝
+    없는 SAM2를 흉내내는 것이고, 이 추정기는 "실제로 그 prompt token 자체를 우리
+    라벨로 파인튜닝한" 진짜 SAM-TP를 쓴다."""
+
+    def __init__(self, checkpoint_path, model_id="facebook/sam2.1-hiera-tiny", device=None):
+        try:
+            import torch
+            from transformers import Sam2Model, Sam2Processor
+        except ImportError as e:
+            raise ImportError(
+                "--estimator sam_tp 를 쓰려면 torch + transformers(Sam2Model 포함 버전)가 "
+                f"필요합니다. (원인: {e})"
+            ) from e
+        if not os.path.isfile(checkpoint_path):
+            raise FileNotFoundError(
+                f"SAM-TP 체크포인트를 못 찾음: {checkpoint_path}\n"
+                "scripts/GeNIE_ws/pre_processing_dataset_withSAM2/03_train_sam_tp.py 로 먼저 학습해줘."
+            )
+        self._torch = torch
+        self.device = device or ("cuda" if torch.cuda.is_available() else "cpu")
+        print(f"[sam_tp] 베이스 {model_id} 로딩 후 체크포인트 적용 중 (device={self.device}) ...")
+        self.processor = Sam2Processor.from_pretrained(model_id)
+        self.model = Sam2Model.from_pretrained(model_id).to(self.device)
+        self.model.load_state_dict(torch.load(checkpoint_path, map_location=self.device))
+        self.model.eval()
+        print(f"[sam_tp] 체크포인트 로딩 완료: {checkpoint_path}")
+
+    def __call__(self, image_bgr):
+        torch = self._torch
+        h, w = image_bgr.shape[:2]
+        image_rgb = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2RGB)
+
+        # point/box/mask를 아예 안 줌 -> 파인튜닝된 not_a_point_embed/no_mask_embed가
+        # 곧 "학습된 prompt token" 역할을 한다 (03번 스크립트 상단 docstring 참고).
+        inputs = self.processor(images=image_rgb, return_tensors="pt").to(self.device)
+        with torch.no_grad():
+            out = self.model(**inputs, multimask_output=False)
+
+        logits = out.pred_masks[0, 0, 0]  # (h_low, w_low) - 학습 때와 동일하게 단일 마스크
+        prob = torch.sigmoid(logits)
+        prob = torch.nn.functional.interpolate(
+            prob[None, None], size=(h, w), mode="bilinear", align_corners=False
+        )[0, 0]
+        return prob.detach().float().cpu().numpy()
+
+
+DEFAULT_SAM_TP_CHECKPOINT = os.path.join(REPO_ROOT, "runs", "sam_tp", "best_sam_tp.pt")
+
+
 def build_traversability_estimator(args):
     """--estimator 값에 따라 (BGR 이미지 -> HxW [0,1] 확률맵) 콜러블을 만들어 반환.
     SAM2 모델은 로딩 비용이 있으므로 프레임마다가 아니라 실행당 한 번만 만든다."""
@@ -313,6 +370,11 @@ def build_traversability_estimator(args):
         return lambda img: estimate_traversability(img, horizon_ratio=args.horizon_ratio)
     if args.estimator == "sam2":
         return Sam2TraversabilityEstimator(model_id=args.sam2_model)
+    if args.estimator == "sam_tp":
+        return SamTPTraversabilityEstimator(
+            checkpoint_path=getattr(args, "sam_tp_checkpoint", None) or DEFAULT_SAM_TP_CHECKPOINT,
+            model_id=args.sam2_model,
+        )
     raise ValueError(f"알 수 없는 --estimator: {args.estimator}")
 
 
@@ -609,7 +671,11 @@ def process_frame(frame_bgr, frame_idx, ride_id, out_dir, args, estimator):
         f"BEV cells: observed={n_known_before}  interpolated(+)={n_filled}  "
         f"unknown={known_mask.size - known_mask.sum()}  (total={known_mask.size})",
     ]
-    heat_label = "Traversability prob. (SAM2)" if args.estimator == "sam2" else "Traversability score (heuristic)"
+    heat_label = {
+        "sam2": "Traversability prob. (SAM2 zero-shot)",
+        "sam_tp": "Traversability prob. (SAM-TP fine-tuned)",
+        "heuristic": "Traversability score (heuristic)",
+    }[args.estimator]
     panel = render_debug_panel(frame_bgr, trav_map, bev_score, known_mask, interpolated_mask, meta, header, heat_label)
 
     os.makedirs(out_dir, exist_ok=True)
@@ -636,11 +702,14 @@ def main():
                      help="BEV gap-filling 시 보간을 허용할 두 실측 셀 사이 최대 간격[m] (기본 1.5m)")
     ap.add_argument("--no-bev-fill", action="store_true",
                      help="BEV gap-filling(보간)을 끄고 순수 투영 결과만 보고 싶을 때 사용")
-    ap.add_argument("--estimator", choices=["sam2", "heuristic"], default="sam2",
-                     help="traversability 추정 방식: sam2(기본, torch+transformers+GPU 필요) "
-                          "또는 heuristic(색상/텍스처 기반, 가벼움)")
+    ap.add_argument("--estimator", choices=["sam2", "heuristic", "sam_tp"], default="sam2",
+                     help="traversability 추정 방식: sam2(기본, zero-shot point prompt), "
+                          "heuristic(색상/텍스처 기반, 가벼움), "
+                          "sam_tp(03_train_sam_tp.py로 우리 라벨에 파인튜닝한 진짜 SAM-TP)")
     ap.add_argument("--sam2-model", default="facebook/sam2.1-hiera-tiny",
-                     help="--estimator sam2 일 때 사용할 HuggingFace 모델 id (기본: 논문과 동일 백본)")
+                     help="베이스 HuggingFace 모델 id (기본: 논문과 동일 백본, sam2/sam_tp 공통)")
+    ap.add_argument("--sam-tp-checkpoint", default=DEFAULT_SAM_TP_CHECKPOINT,
+                     help=f"--estimator sam_tp 일 때 쓸 체크포인트 경로 (기본: {DEFAULT_SAM_TP_CHECKPOINT})")
     ap.add_argument("--out", default=DEBUG_DIR, help="디버그 이미지 저장 루트 폴더 (기본: <repo>/debug)")
     args = ap.parse_args()
 
