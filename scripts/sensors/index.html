@@ -1,0 +1,559 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Earth Rover 실시간 센서 대시보드</title>
+<style>
+  :root {
+    --bg: #0f1216;
+    --panel: #171b21;
+    --border: #262c35;
+    --text: #e6e8eb;
+    --muted: #8b93a1;
+    --accent: #4fd1c5;
+    --ok: #4fd17a;
+    --bad: #e6555a;
+    --warn: #e6b955;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--text);
+    font-family: -apple-system, "Segoe UI", "Malgun Gothic", sans-serif;
+    font-size: 13px;
+  }
+  header {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 10px 16px;
+    background: var(--panel);
+    border-bottom: 1px solid var(--border);
+    flex-wrap: wrap;
+  }
+  header h1 { font-size: 15px; margin: 0; margin-right: 8px; white-space: nowrap; }
+  header input {
+    background: #0f1216;
+    border: 1px solid var(--border);
+    color: var(--text);
+    padding: 5px 8px;
+    border-radius: 6px;
+    width: 220px;
+  }
+  header button {
+    background: var(--accent);
+    border: none;
+    color: #072320;
+    font-weight: 600;
+    padding: 6px 12px;
+    border-radius: 6px;
+    cursor: pointer;
+  }
+  .dot { width: 9px; height: 9px; border-radius: 50%; background: var(--bad); flex-shrink: 0; }
+  .dot.ok { background: var(--ok); }
+  .status-text { color: var(--muted); }
+  main {
+    display: grid;
+    grid-template-columns: minmax(320px, 1.3fr) minmax(280px, 0.9fr);
+    gap: 12px;
+    padding: 12px;
+  }
+  .panel {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 10px 12px;
+  }
+  .panel h2 {
+    font-size: 12px;
+    text-transform: uppercase;
+    letter-spacing: .04em;
+    color: var(--muted);
+    margin: 0 0 8px 0;
+  }
+  .cams { display: flex; gap: 8px; flex-wrap: wrap; }
+  .cam { flex: 1; min-width: 220px; position: relative; }
+  .cam img {
+    width: 100%;
+    display: block;
+    background: #000;
+    border-radius: 6px;
+    aspect-ratio: 16/9;
+    object-fit: cover;
+  }
+  .cam .placeholder {
+    position: absolute;
+    top: 0; left: 0; right: 0;
+    aspect-ratio: 16/9;
+    border-radius: 6px;
+    background: #000;
+    color: var(--muted);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    text-align: center;
+    line-height: 1.5;
+  }
+  .cam .label { color: var(--muted); margin: 4px 0; }
+  .perc-imgs { display: flex; gap: 8px; flex-wrap: wrap; }
+  .perc-imgs .cam img { aspect-ratio: 4/3; object-fit: contain; }
+  .xyz-readout { display: flex; gap: 10px; font-size: 10px; margin-top: 1px; font-variant-numeric: tabular-nums; }
+  .xyz-readout .x { color: #e6555a; }
+  .xyz-readout .y { color: #4fd17a; }
+  .xyz-readout .z { color: #4fa8e6; }
+  .stat-grid {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 8px;
+  }
+  .stat {
+    background: #0f1216;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 8px 10px;
+  }
+  .stat .k { color: var(--muted); font-size: 11px; }
+  .stat .v { font-size: 18px; font-weight: 600; margin-top: 2px; }
+  .stat .v small { font-size: 11px; color: var(--muted); font-weight: 400; }
+  canvas { width: 100%; display: block; }
+  #speedCanvas { height: 60px; }
+  #gpsCanvas { height: 180px; }
+  .gps-imu-row { display: flex; gap: 10px; align-items: flex-start; }
+  .gps-col { flex: 2; min-width: 0; }
+  .imu-col { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 5px; }
+  .imu-block { margin-bottom: 0; }
+  .imu-block canvas { height: 20px; }
+  .imu-block .imu-title { color: var(--muted); font-size: 10px; }
+  footer { color: var(--muted); padding: 4px 16px 16px; font-size: 11px; }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>🤖 Earth Rover 실시간 센서 대시보드</h1>
+  <span class="dot" id="statusDot"></span>
+  <span class="status-text" id="statusText">연결 대기 중</span>
+  <input id="baseUrlInput" type="text" placeholder="http://localhost:8000" />
+  <button id="connectBtn">연결</button>
+  <span class="status-text" id="fpsText"></span>
+</header>
+
+<main>
+  <!-- LEFT column: cameras + perception (traversability/path) -->
+  <div style="display:flex; flex-direction:column; gap:12px;">
+
+    <div class="panel">
+      <h2>카메라</h2>
+      <div class="cams">
+        <div class="cam">
+          <img id="frontImg" alt="front camera" />
+          <div class="placeholder" id="frontPlaceholder" style="display:none;">신호 없음</div>
+          <div class="label">Front</div>
+        </div>
+        <div class="cam">
+          <img id="rearImg" alt="rear camera" />
+          <div class="placeholder" id="rearPlaceholder" style="display:none;">후면 카메라 없음<br><small>(.env의 HAS_REAR_CAMERA 확인)</small></div>
+          <div class="label">Rear</div>
+        </div>
+      </div>
+    </div>
+
+    <div class="panel">
+      <h2>Traversability + Path <span class="status-text" id="percStatus">(연결 대기 중)</span></h2>
+      <div class="perc-imgs">
+        <div class="cam">
+          <img id="percFrontImg" alt="front + traversability + path" />
+          <div class="label">Front + Traversability/Path</div>
+        </div>
+        <div class="cam">
+          <img id="percBevImg" alt="bev + path" />
+          <div class="label">BEV + Path</div>
+        </div>
+      </div>
+      <div class="status-text" id="percText" style="margin-top:4px;"></div>
+    </div>
+
+  </div>
+
+  <!-- RIGHT column: status + speed + gps/imu -->
+  <div style="display:flex; flex-direction:column; gap:12px;">
+
+    <div class="panel">
+      <h2>상태</h2>
+      <div class="stat-grid">
+        <div class="stat"><div class="k">Battery</div><div class="v" id="stBattery">--<small>%</small></div></div>
+        <div class="stat"><div class="k">Signal</div><div class="v" id="stSignal">--<small>/5</small></div></div>
+        <div class="stat"><div class="k">GPS Signal</div><div class="v" id="stGpsSignal">--<small>%</small></div></div>
+        <div class="stat"><div class="k">Speed</div><div class="v" id="stSpeed">--</div></div>
+        <div class="stat"><div class="k">Orientation</div><div class="v" id="stOrientation">--</div></div>
+        <div class="stat"><div class="k">Lamp</div><div class="v" id="stLamp">--</div></div>
+      </div>
+    </div>
+
+    <div class="panel">
+      <h2>속도 추이</h2>
+      <canvas id="speedCanvas" height="60"></canvas>
+    </div>
+
+    <div class="panel">
+      <h2>GPS / IMU</h2>
+      <div class="gps-imu-row">
+        <div class="gps-col">
+          <div class="status-text" id="gpsText">lat -- / lon --</div>
+          <canvas id="gpsCanvas" height="180" style="margin-top:6px;"></canvas>
+        </div>
+        <div class="imu-col">
+          <div class="imu-block">
+            <div class="imu-title">Accel (g)</div>
+            <canvas id="accelCanvas" height="20"></canvas>
+            <div class="xyz-readout" id="accelReadout"><span class="x">X --</span><span class="y">Y --</span><span class="z">Z --</span></div>
+          </div>
+          <div class="imu-block">
+            <div class="imu-title">Gyro (단위 미상)</div>
+            <canvas id="gyroCanvas" height="20"></canvas>
+            <div class="xyz-readout" id="gyroReadout"><span class="x">X --</span><span class="y">Y --</span><span class="z">Z --</span></div>
+          </div>
+          <div class="imu-block">
+            <div class="imu-title">Mag (단위 미상)</div>
+            <canvas id="magCanvas" height="20"></canvas>
+            <div class="xyz-readout" id="magReadout"><span class="x">X --</span><span class="y">Y --</span><span class="z">Z --</span></div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+  </div>
+</main>
+
+<footer>
+  /data 는 500ms, /v2/front·/v2/rear 는 150ms, /traversability(전면 traversability+path, BEV+path)는 300ms 간격으로
+  폴링합니다. /traversability는 이 대시보드와 같은 포트(scripts/sensors/serve_dashboard.py)에서 서빙되며,
+  실제 갱신 속도는 응답의 infer_ms(추론 1회 소요 시간)를 따라갑니다 — 폴링 주기보다 느릴 수 있습니다.
+  orientation 값은 SDK가 0~255 범위로 보내는 것으로 보여 나침반 표시는 이를 360°로 환산한 추정치입니다.
+</footer>
+
+<script>
+(() => {
+  const $ = (id) => document.getElementById(id);
+
+  const statusDot = $("statusDot");
+  const statusText = $("statusText");
+  const baseUrlInput = $("baseUrlInput");
+  const connectBtn = $("connectBtn");
+  const fpsText = $("fpsText");
+
+  const savedBase = localStorage.getItem("rover_base_url") || "http://localhost:8000";
+  baseUrlInput.value = savedBase;
+  let baseUrl = savedBase.replace(/\/$/, "");
+
+  connectBtn.addEventListener("click", () => {
+    baseUrl = baseUrlInput.value.trim().replace(/\/$/, "") || "http://localhost:8000";
+    localStorage.setItem("rover_base_url", baseUrl);
+  });
+
+  function setConnected(ok, msg) {
+    statusDot.classList.toggle("ok", ok);
+    statusText.textContent = msg;
+  }
+
+  // ---------- generic multi-series sparkline ----------
+  // opts.axis: draw min/max value labels (left) and elapsed-time labels (bottom),
+  // assuming samples were pushed at a fixed opts.intervalSec cadence.
+  function drawSparkline(canvas, seriesList, colors, opts = {}) {
+    const ctx = canvas.getContext("2d");
+    const dpr = window.devicePixelRatio || 1;
+    const w = canvas.clientWidth || 300;
+    const h = canvas.clientHeight || 60;
+    canvas.width = w * dpr;
+    canvas.height = h * dpr;
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    ctx.clearRect(0, 0, w, h);
+
+    const allVals = seriesList.flat().filter((v) => typeof v === "number" && !Number.isNaN(v));
+    if (allVals.length === 0) return;
+    let min = Math.min(...allVals);
+    let max = Math.max(...allVals);
+    if (min === max) { min -= 1; max += 1; }
+    const pad = (max - min) * 0.1;
+    min -= pad; max += pad;
+
+    const topPad = opts.axis ? 11 : 0;
+    const bottomPad = opts.axis ? 11 : 0;
+    const plotH = h - topPad - bottomPad;
+
+    ctx.strokeStyle = "#262c35";
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.moveTo(0, topPad + plotH / 2);
+    ctx.lineTo(w, topPad + plotH / 2);
+    ctx.stroke();
+
+    seriesList.forEach((series, i) => {
+      if (series.length < 2) return;
+      ctx.strokeStyle = colors[i] || "#4fd1c5";
+      ctx.lineWidth = 1.5;
+      ctx.beginPath();
+      series.forEach((v, idx) => {
+        const x = (idx / (series.length - 1)) * w;
+        const y = topPad + plotH - ((v - min) / (max - min)) * plotH;
+        if (idx === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+      });
+      ctx.stroke();
+    });
+
+    if (opts.axis) {
+      const unit = opts.unit || "";
+      const longest = seriesList.reduce((a, s) => (s.length > a.length ? s : a), []);
+      ctx.font = "10px sans-serif";
+      ctx.fillStyle = "#8b93a1";
+      ctx.textBaseline = "top";
+      ctx.fillText(`${max.toFixed(2)}${unit}`, 2, 0);
+      ctx.textBaseline = "bottom";
+      ctx.fillText(`${min.toFixed(2)}${unit}`, 2, h);
+      if (opts.intervalSec && longest.length > 1) {
+        const spanSec = (longest.length - 1) * opts.intervalSec;
+        ctx.textAlign = "right";
+        ctx.textBaseline = "bottom";
+        ctx.fillText(`-${spanSec.toFixed(0)}s`, w - 2, h);
+        ctx.textBaseline = "top";
+        ctx.fillText("now", w - 2, 0);
+        ctx.textAlign = "left";
+      }
+    }
+  }
+
+  // ---------- telemetry (GET /data) ----------
+  const speedHistory = [];
+  const MAX_SPEED_HISTORY = 120;
+  const gpsTrail = []; // [{lat, lon}]
+  const MAX_GPS_TRAIL = 500;
+  let lastOrientation = null;
+
+  function lastXYZSeries(samples) {
+    // samples: [[x,y,z,ts], ...] -> {x:[...], y:[...], z:[...]}
+    if (!Array.isArray(samples)) return { x: [], y: [], z: [] };
+    return {
+      x: samples.map((s) => s[0]),
+      y: samples.map((s) => s[1]),
+      z: samples.map((s) => s[2]),
+    };
+  }
+
+  function projectGpsTrail(trail) {
+    if (trail.length === 0) return [];
+    const R = 6378137;
+    const lat0 = trail[0].lat * Math.PI / 180;
+    const lon0 = trail[0].lon * Math.PI / 180;
+    return trail.map(({ lat, lon }) => {
+      const dLat = (lat * Math.PI / 180) - lat0;
+      const dLon = (lon * Math.PI / 180) - lon0;
+      return {
+        x: dLon * Math.cos(lat0) * R,
+        y: dLat * R,
+      };
+    });
+  }
+
+  function drawGpsTrail() {
+    const canvas = $("gpsCanvas");
+    const ctx = canvas.getContext("2d");
+    const dpr = window.devicePixelRatio || 1;
+    const w = canvas.clientWidth || 260;
+    const h = canvas.clientHeight || 180;
+    canvas.width = w * dpr;
+    canvas.height = h * dpr;
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    ctx.clearRect(0, 0, w, h);
+
+    const pts = projectGpsTrail(gpsTrail);
+    if (pts.length === 0) return;
+
+    const xs = pts.map((p) => p.x), ys = pts.map((p) => p.y);
+    let minX = Math.min(...xs), maxX = Math.max(...xs);
+    let minY = Math.min(...ys), maxY = Math.max(...ys);
+    const span = Math.max(maxX - minX, maxY - minY, 2); // meters, avoid zero-div
+    const pad = span * 0.15;
+    minX -= pad; minY -= pad;
+    const scale = (w - 20) / (span + pad * 2);
+    const toPx = (p) => ({
+      px: 10 + (p.x - minX) * scale,
+      py: h - 10 - (p.y - minY) * scale,
+    });
+
+    ctx.strokeStyle = "#4fd1c5";
+    ctx.lineWidth = 1.5;
+    ctx.beginPath();
+    pts.forEach((p, i) => {
+      const { px, py } = toPx(p);
+      if (i === 0) ctx.moveTo(px, py); else ctx.lineTo(px, py);
+    });
+    ctx.stroke();
+
+    // current position + heading arrow
+    const cur = toPx(pts[pts.length - 1]);
+    ctx.fillStyle = "#4fd1c5";
+    ctx.beginPath();
+    ctx.arc(cur.px, cur.py, 4, 0, Math.PI * 2);
+    ctx.fill();
+
+    if (lastOrientation !== null) {
+      const heading = (lastOrientation / 255) * 2 * Math.PI; // assumed 0-255 -> 0-360
+      const ex = cur.px + Math.sin(heading) * 14;
+      const ey = cur.py - Math.cos(heading) * 14;
+      ctx.strokeStyle = "#e6b955";
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      ctx.moveTo(cur.px, cur.py);
+      ctx.lineTo(ex, ey);
+      ctx.stroke();
+    }
+  }
+
+  function updateTelemetry(data) {
+    $("stBattery").innerHTML = `${data.battery ?? "--"}<small>%</small>`;
+    $("stSignal").innerHTML = `${data.signal_level ?? "--"}<small>/5</small>`;
+    $("stGpsSignal").innerHTML = `${data.gps_signal ?? "--"}<small>%</small>`;
+    $("stSpeed").textContent = data.speed ?? "--";
+    $("stOrientation").textContent = data.orientation ?? "--";
+    $("stLamp").textContent = data.lamp ? "ON" : "OFF";
+
+    lastOrientation = typeof data.orientation === "number" ? data.orientation : lastOrientation;
+
+    if (typeof data.speed === "number") {
+      speedHistory.push(data.speed);
+      if (speedHistory.length > MAX_SPEED_HISTORY) speedHistory.shift();
+      drawSparkline($("speedCanvas"), [speedHistory], ["#4fd1c5"], { axis: true, intervalSec: 0.5 });
+    }
+
+    // SDK sends an out-of-range placeholder (e.g. 1000,1000) before it has a real GPS fix.
+    const hasGpsFix = typeof data.latitude === "number" && typeof data.longitude === "number"
+      && Math.abs(data.latitude) <= 90 && Math.abs(data.longitude) <= 180;
+    if (hasGpsFix) {
+      $("gpsText").textContent = `lat ${data.latitude.toFixed(6)} / lon ${data.longitude.toFixed(6)}`;
+      gpsTrail.push({ lat: data.latitude, lon: data.longitude });
+      if (gpsTrail.length > MAX_GPS_TRAIL) gpsTrail.shift();
+      drawGpsTrail();
+    } else {
+      $("gpsText").textContent = `GPS 신호 없음 (raw: ${data.latitude}, ${data.longitude})`;
+    }
+
+    const fmt = (v) => (typeof v === "number" ? v.toFixed(3) : "--");
+    const setReadout = (id, x, y, z) => {
+      const el = $(id);
+      el.children[0].textContent = `X ${fmt(x)}`;
+      el.children[1].textContent = `Y ${fmt(y)}`;
+      el.children[2].textContent = `Z ${fmt(z)}`;
+    };
+
+    const accel = lastXYZSeries(data.accels);
+    drawSparkline($("accelCanvas"), [accel.x, accel.y, accel.z], ["#e6555a", "#4fd17a", "#4fa8e6"]);
+    setReadout("accelReadout", accel.x.at(-1), accel.y.at(-1), accel.z.at(-1));
+
+    const gyro = lastXYZSeries(data.gyros);
+    drawSparkline($("gyroCanvas"), [gyro.x, gyro.y, gyro.z], ["#e6555a", "#4fd17a", "#4fa8e6"]);
+    setReadout("gyroReadout", gyro.x.at(-1), gyro.y.at(-1), gyro.z.at(-1));
+
+    const mag = lastXYZSeries(data.mags);
+    drawSparkline($("magCanvas"), [mag.x, mag.y, mag.z], ["#e6555a", "#4fd17a", "#4fa8e6"]);
+    setReadout("magReadout", mag.x.at(-1), mag.y.at(-1), mag.z.at(-1));
+  }
+
+  async function telemetryLoop() {
+    try {
+      const res = await fetch(`${baseUrl}/data`);
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const data = await res.json();
+      updateTelemetry(data);
+      setConnected(true, "연결됨");
+    } catch (e) {
+      setConnected(false, `연결 끊김 (${e.message})`);
+    } finally {
+      setTimeout(telemetryLoop, 500);
+    }
+  }
+
+  // ---------- video (GET /v2/front, /v2/rear) ----------
+  let frameCount = 0;
+  let fpsWindowStart = performance.now();
+
+  const showFrame = (imgId, placeholderId, b64) => {
+    const img = $(imgId);
+    const placeholder = $(placeholderId);
+    if (b64) {
+      img.src = `data:image/jpeg;base64,${b64}`;
+      img.style.display = "";
+      placeholder.style.display = "none";
+    } else {
+      img.style.display = "none";
+      placeholder.style.display = "flex";
+    }
+  };
+
+  // /v2/screenshot only asks the SDK for a rear frame when BOT_TYPE == "zero"
+  // (hardcoded in the vendor's main.py), so it silently omits rear_frame for
+  // other bot types even when a rear camera is actually publishing. /v2/front
+  // and /v2/rear have no such gate, so we hit them separately instead.
+  async function videoLoop() {
+    try {
+      const [frontRes, rearRes] = await Promise.all([
+        fetch(`${baseUrl}/v2/front`),
+        fetch(`${baseUrl}/v2/rear`),
+      ]);
+      const frontData = frontRes.ok ? await frontRes.json() : {};
+      const rearData = rearRes.ok ? await rearRes.json() : {};
+
+      showFrame("frontImg", "frontPlaceholder", frontData.front_frame);
+      showFrame("rearImg", "rearPlaceholder", rearData.rear_frame);
+
+      if (!frontRes.ok && !rearRes.ok) throw new Error(`HTTP ${frontRes.status}/${rearRes.status}`);
+
+      frameCount++;
+      const now = performance.now();
+      const elapsed = now - fpsWindowStart;
+      if (elapsed >= 1000) {
+        fpsText.textContent = `${(frameCount / (elapsed / 1000)).toFixed(1)} fps`;
+        frameCount = 0;
+        fpsWindowStart = now;
+      }
+    } catch (e) {
+      // telemetryLoop already surfaces the connection status
+    } finally {
+      setTimeout(videoLoop, 150);
+    }
+  }
+
+  // ---------- traversability + path (GET /traversability, same-origin — served by
+  // scripts/sensors/serve_dashboard.py itself via scripts/perception/live_bridge.py) ----------
+  async function perceptionLoop() {
+    try {
+      const res = await fetch("/traversability");
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const data = await res.json();
+      if (data.status === "ok") {
+        $("percFrontImg").src = `data:image/jpeg;base64,${data.front_image}`;
+        $("percBevImg").src = `data:image/jpeg;base64,${data.bev_image}`;
+        $("percStatus").textContent = `(연결됨)`;
+        $("percText").textContent =
+          `estimator=${data.estimator}  infer=${data.infer_ms}ms (~${(1000 / Math.max(data.infer_ms, 1)).toFixed(1)}fps)  frame=${data.frame}  goal=${data.goal_deg}deg(고정)`;
+      } else if (data.status === "error") {
+        $("percStatus").textContent = `(에러: ${data.error})`;
+      } else {
+        $("percStatus").textContent = `(대기 중...)`;
+      }
+    } catch (e) {
+      $("percStatus").textContent = `(연결 끊김: ${e.message})`;
+    } finally {
+      setTimeout(perceptionLoop, 300);
+    }
+  }
+
+  telemetryLoop();
+  videoLoop();
+  perceptionLoop();
+})();
+</script>
+
+</body>
+</html>

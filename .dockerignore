@@ -1,0 +1,22 @@
+.git
+**/.git
+**/__pycache__
+**/*.pyc
+**/.pytest_cache
+**/.mypy_cache
+
+# Large/generated runtime data is provided by the development bind mount
+# rather than baked into the image.
+data
+debug
+runs
+bev_policy_data
+
+*.pt
+*.pth
+*.ckpt
+*.npz
+
+# Never bake credentials into an image.
+.env
+**/.env

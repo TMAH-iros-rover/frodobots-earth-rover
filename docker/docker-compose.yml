@@ -1,0 +1,69 @@
+services:
+  earth-rover:
+    container_name: frodobots-earth-rover
+
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+
+    working_dir: /frodobots-earth-rover
+
+    command:
+      - sh
+      - -c
+      - >-
+        cd earth-rovers-sdk &&
+        exec python3 -m hypercorn main:app --reload --bind 0.0.0.0:8000
+
+    env_file:
+      - ../earth-rovers-sdk/.env
+
+    environment:
+      PYTHONUNBUFFERED: "1"
+      PYTHONPATH: /frodobots-earth-rover/earth-rovers-sdk:/frodobots-earth-rover
+
+      # Linux X11 GUI forwarding.
+      DISPLAY: ${DISPLAY:-:0}
+      QT_X11_NO_MITSHM: "1"
+
+      # NVIDIA Container Toolkit uses these variables with `gpus: all`.
+      NVIDIA_VISIBLE_DEVICES: all
+      NVIDIA_DRIVER_CAPABILITIES: all
+
+    volumes:
+      # Live development mount: edits made on either side are immediately
+      # visible in both the host repository and the container.
+      - ../:/frodobots-earth-rover
+
+      # X11 display socket for OpenCV/Chromium GUI windows.
+      - /tmp/.X11-unix:/tmp/.X11-unix:rw
+
+      # Preserve downloaded Playwright browser assets between rebuilds.
+      - playwright-cache:/root/.cache/ms-playwright
+
+    ports:
+      - "8000:8000" # Earth Rover SDK
+      - "5050:5050" # SAM2 annotation app
+      - "9222:9222" # Chromium remote debugging
+
+    gpus: all
+    shm_size: "8gb"
+    ipc: host
+
+    devices:
+      - /dev/input:/dev/input:rwm
+      # Uncomment when direct host camera access is needed:
+      # - /dev/video0:/dev/video0
+      # Uncomment for Intel/AMD graphics or hardware video acceleration:
+      # - /dev/dri:/dev/dri
+
+    # Broad device/kernel access requested for rover development. Remove this
+    # once the exact required devices and capabilities are known.
+    privileged: true
+
+    stdin_open: true
+    tty: true
+    restart: unless-stopped
+
+volumes:
+  playwright-cache:
